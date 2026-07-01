@@ -365,21 +365,36 @@ notes, not documentation.
 
 Below are {len(candidates)} candidate stories.
 
-FIRST, DECIDE HOW MANY STORIES TO COVER:
-Judge how much genuinely worthwhile tech news there is today. Cover between
-{MIN_STORIES} and {max_stories} stories — YOUR CHOICE based on the actual news.
-- Each story is tagged with how many sources covered it. A story covered by
-  MULTIPLE sources is usually more important — weight those higher when choosing
-  what to cover and how much time to give it. A single-source story can still be
-  worth covering if it's substantial (a notable release, a real breach, big funding).
-- If it's a big news day with lots of substantial stories, cover more (up to {max_stories}).
-- If it's a slow day and only a few stories really matter, cover fewer (as few as {MIN_STORIES}).
-- Do NOT pad the episode with weak stories just to hit a number. Quality over quantity.
-- Only count AI/ML, chips/hardware, dev tools/open source, security, and funding/M&A
-  as strong. Consumer gadget reviews, gaming deals, entertainment, and rumors are NOT
-  worth covering — exclude them entirely even if it means a shorter episode.
+STEP 1 — SCORE EACH STORY FOR NOTEWORTHINESS (think like a sharp tech editor):
+Before choosing anything, evaluate each candidate against these questions. This is
+how you find quality signal instead of routine noise:
 
-CANDIDATE STORIES:
+  1. NOVELTY: Is this genuinely new, or is it a routine, expected event? Recurring
+     maintenance — minor OS point-releases, routine security-patch roundups, "X app
+     gets small update", weekly deal posts — is NOT noteworthy even when many outlets
+     cover it. Those outlets cover it out of routine, not because it matters.
+  2. CONSEQUENCE: Does it change something? A new capability, a shift in the market,
+     a real vulnerability being exploited, a product that didn't exist yesterday, money
+     actually moving. If nothing is different afterward, it's not a story.
+  3. SURPRISE / INFORMATION: Would a knowledgeable engineer already assume this happened?
+     "Apple shipped a bug-fix update" carries near-zero information — everyone knows Apple
+     constantly ships those. "Apple shipped an emergency patch for a zero-day being actively
+     exploited" carries real information. Same category, totally different noteworthiness.
+  4. DEPTH AVAILABLE: Is there enough substance to actually talk about for a minute, or
+     would you just be reading the headline back?
+
+A story covered by many sources is only meaningful if it ALSO passes the questions above.
+Wide coverage of a routine event (a normal iOS update) is just routine coverage — do not
+mistake volume for importance. Weight your own editorial judgment above the source count.
+
+STEP 2 — DECIDE HOW MANY TO COVER ({MIN_STORIES} to {max_stories}):
+Cover only the stories that genuinely clear the bar above. A big news day might yield
+{max_stories} real stories; a slow day might only yield {MIN_STORIES}. Never pad with
+routine non-events to hit a number — a tight episode of {MIN_STORIES} strong stories beats
+a padded one. Favor: real AI/ML developments, chips and hardware shifts, meaningful dev-tool
+and open-source releases, actual security incidents, and funding/M&A with real figures.
+
+CANDIDATE STORIES (with how many sources covered each — use as ONE input, not the decider):
 {candidate_block}
 
 Output in EXACTLY this format (list ONLY the titles you actually chose to cover,
@@ -436,7 +451,13 @@ VOICE:
 FORMAT:
 - Spoken prose only. No markdown, bullets, asterisks, or headers.
 - Don't name the news outlets. Don't start sentences with "today" or "here's".
-- Open with one tight line (the date, that it's the day's tech). End with one dry line.
+- OPENER: start with exactly this line, filling in the real date:
+  "It's [Month Day]. This is your Daily Dump of tech news."
+- CLOSER: end with exactly this line: "And that's your Daily Dump."
+- BETWEEN STORIES: put the marker [[PAUSE]] on its own line between each story
+  (after you finish one story, before you start the next). This signals a beat of
+  silence so the listener hears a clear break between subjects. Do NOT put a pause
+  after the opener or before the closer — only between the story bodies.
 
 LENGTH: The episode should always run about 5 minutes — roughly 700 words total,
 NO MATTER how many stories you cover. This is important: if you only cover 3 stories,
@@ -552,6 +573,11 @@ def clean_for_speech(script: str) -> str:
 
     text = script
 
+    # Convert story-break markers into a natural spoken pause FIRST, before we
+    # strip brackets below. Edge TTS pauses on sentence breaks; a short line of
+    # ellipses on its own gives a clear beat of silence between subjects.
+    text = re.sub(r"\[\[\s*PAUSE\s*\]\]", "\n\n … \n\n", text, flags=re.IGNORECASE)
+
     # Remove code spans / backticks entirely (keep inner text but drop the ticks)
     text = text.replace("`", "")
     # Remove markdown emphasis characters
@@ -580,7 +606,7 @@ def text_to_speech(script: str, output_path: str) -> bool:
         # than GuyNeural. Other good options: en-US-BrianMultilingualNeural (relaxed),
         # en-US-AvaMultilingualNeural (female, natural).
         VOICE = "en-US-AndrewMultilingualNeural"
-        RATE  = "+10%"   # natural but with a bit of pace
+        RATE  = "+12%"   # natural but with a bit of pace
 
         async def _synth():
             communicate = edge_tts.Communicate(script, VOICE, rate=RATE)
@@ -594,8 +620,21 @@ def text_to_speech(script: str, output_path: str) -> bool:
 
 
 def get_mp3_duration_seconds(mp3_path: str) -> int:
+    """
+    Get MP3 duration. Tries mutagen for the real value; falls back to a
+    bitrate-based estimate. Edge TTS output is ~24 kbps mono → ~3000 bytes/sec.
+    """
+    # Try to read the true duration if mutagen is available
     try:
-        return max(1, os.path.getsize(mp3_path) // 16000)
+        from mutagen.mp3 import MP3
+        audio = MP3(mp3_path)
+        if audio.info and audio.info.length > 0:
+            return int(audio.info.length)
+    except Exception:
+        pass
+    # Fallback estimate tuned to Edge TTS bitrate (~24 kbps = ~3000 bytes/sec)
+    try:
+        return max(1, os.path.getsize(mp3_path) // 3000)
     except Exception:
         return 300
 
@@ -676,7 +715,13 @@ def main():
 
     print(f"[{today_str}] Writing script with Gemini...")
     script, titles = write_script_gemini(candidates, ceiling)
-    word_count = len(script.split())
+
+    def _wc(s):
+        # Word count excluding pause markers
+        import re
+        return len(re.sub(r"\[\[\s*PAUSE\s*\]\]", " ", s, flags=re.IGNORECASE).split())
+
+    word_count = _wc(script)
     n_stories = len(titles)
     print(f"  Stories chosen: {n_stories}")
     for t in titles:
@@ -687,7 +732,7 @@ def main():
     if word_count < 620:
         print(f"  Under 5-min target — asking Gemini to expand...")
         script = expand_script(script, target_low=700)
-        word_count = len(script.split())
+        word_count = _wc(script)
         print(f"  After expansion: {word_count} words (~{word_count // 130} min)")
 
     # Absolute stub guard: below this, something is genuinely broken.
@@ -697,8 +742,12 @@ def main():
             "publish a broken episode. Check the Gemini response above."
         )
 
+    # Save a clean transcript (pause markers removed) for the archive
+    import re as _re
+    clean_transcript = _re.sub(r"\[\[\s*PAUSE\s*\]\]", "", script, flags=_re.IGNORECASE)
+    clean_transcript = _re.sub(r"\n{3,}", "\n\n", clean_transcript).strip()
     with open(script_path, "w") as f:
-        f.write(script)
+        f.write(clean_transcript)
     print(f"  Script saved → {script_path}")
 
     print(f"[{today_str}] Converting to audio...")
