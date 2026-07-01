@@ -1,4 +1,2 @@
-feedparser
 edge-tts
 requests
-google-generativeai
