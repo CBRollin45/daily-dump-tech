@@ -231,39 +231,64 @@ def write_script_gemini(candidates: list) -> tuple:
 
     prompt = f"""Today is {today}.
 
-You are writing a script for a daily audio tech news briefing called Daily Dump Tech.
+You are writing the script for a daily tech news podcast called Daily Dump Tech.
+It is modeled directly on the TLDR tech newsletter: written BY an engineer FOR
+engineers. Dense, factual, zero hype, zero hand-holding. The listener is a
+software engineer, security researcher, or founder who already knows the field.
+Respect their intelligence. Give them the facts and trust them to get it.
 
-Below are {len(candidates)} candidate tech news stories from today. Pick the {HEADLINES_COUNT}
-MOST important and substantive ones. Prioritize: major AI developments, big tech company
-news, significant product launches, cybersecurity, notable startups and funding, science
-and space tech, major policy or legal news. Deprioritize: gaming deals, gadget sale
-round-ups, celebrity or entertainment fluff, listicles, and evergreen how-to articles.
+Below are {len(candidates)} candidate stories. Pick the {HEADLINES_COUNT} MOST
+substantive for a technical audience. Strongly prioritize:
+- AI/ML model releases, benchmarks, research papers, capabilities
+- Chips, semiconductors, hardware, data centers, infrastructure
+- Developer tools, frameworks, languages, open source, APIs
+- Security: specific vulnerabilities, CVEs, breaches, exploits, patches
+- Funding rounds, acquisitions, IPOs with real dollar figures
+Strongly AVOID: consumer gadget reviews, hands-on impressions, gaming deals,
+entertainment, anything sourced from user reviews or opinions, listicles, rumors.
 
 CANDIDATE STORIES:
 {candidate_block}
 
-First output the chosen titles, then the script, in EXACTLY this format:
+Output in EXACTLY this format:
 
-TITLES: <chosen title 1> | <chosen title 2> | <chosen title 3> | <chosen title 4> | <chosen title 5>
+TITLES: <title 1> | <title 2> | <title 3> | <title 4> | <title 5>
 
 SCRIPT:
-<the full script here>
+<the full script>
 
-SCRIPT RULES:
-- Fast, punchy news anchor energy. No fluff.
-- No filler phrases: no "Let's dive in", "Stay tuned", "Without further ado"
-- Write for the ear — short sentences, active voice
-- NO bullet points, NO markdown, NO asterisks, NO headers
-- Do NOT name news sources
-- Do NOT start sentences with "today" or "here's"
-- CRITICAL LENGTH REQUIREMENT: The script MUST be between 650 and 750 words.
-  This is roughly 130 words per story. Give each of the five stories a FULL
-  3 to 4 sentences: what happened, why it matters, and one extra detail or
-  implication. Do not write one-line blurbs. If your draft is under 650 words,
-  expand each story with more context until you hit the target. Count as you go.
-- Structure: one cold-open sentence (mention the date and "five stories in tech"),
-  then the five stories back to back with full treatment, then one dry punchy
-  sign-off sentence.
+HOW TO WRITE IT — study these rules, this is the whole point:
+
+TLDR VOICE:
+- Write like a smart engineer telling a colleague what happened. Not a news anchor,
+  not a narrator, not an AI assistant summarizing.
+- Lead every story with the hard fact: the company, the number, the version, the CVE ID,
+  the benchmark result, the dollar amount. Specifics first, always.
+- State facts flatly and let them land. Do NOT explain "why this matters" or add a
+  takeaway sentence — the audience already knows why it matters. Trust them.
+- NEVER use these: "one user review says", "reviewers say", "according to reports",
+  "sources say", "in a move that", "the tech world", "buckle up", "let's dive in",
+  "stay tuned", "it's worth noting", "interestingly", "notably".
+- NO hype adjectives: no "exciting", "fascinating", "groundbreaking", "revolutionary",
+  "game-changer", "massive", "huge" (unless it's a literal figure).
+- Use real contractions and natural rhythm. Short declarative sentences. Occasional
+  dry aside is fine. Vary sentence length so it doesn't sound like a list.
+- Transitions between stories should be minimal and natural ("Elsewhere," "Meanwhile,"
+  "In chips,") — never "Our next story is" or "Moving on to".
+- Say numbers and acronyms the way a person would out loud (e.g. "a hundred million
+  dollars", "GPT", "the C-V-E").
+
+FORMAT:
+- NO markdown, NO bullets, NO asterisks, NO headers. Spoken prose only.
+- Do NOT name the news outlets.
+- Do NOT start sentences with "today" or "here's".
+- Open with ONE tight line: the date and that this is the day's tech. No throat-clearing.
+- Then the five stories back to back, each 3-5 sentences of dense factual coverage.
+- End with ONE dry sign-off line. No "thanks for listening".
+
+LENGTH — REQUIRED: 750 to 850 words total. This is a 5-6 minute episode. If your
+draft is under 750 words, add more concrete technical detail to each story (specs,
+numbers, names, context a technical listener would want) until you reach it.
 
 Begin now:"""
 
@@ -274,8 +299,8 @@ Begin now:"""
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature":      0.7,
-            "maxOutputTokens":  4000,
+            "temperature":      0.8,
+            "maxOutputTokens":  5000,
             "thinkingConfig": {"thinkingBudget": 0},
         },
     }
@@ -317,8 +342,11 @@ def text_to_speech(script: str, output_path: str) -> bool:
         import edge_tts
         import asyncio
 
-        VOICE = "en-US-GuyNeural"
-        RATE  = "+15%"
+        # AndrewMultilingual — warm, natural, conversational. Much less robotic
+        # than GuyNeural. Other good options: en-US-BrianMultilingualNeural (relaxed),
+        # en-US-AvaMultilingualNeural (female, natural).
+        VOICE = "en-US-AndrewMultilingualNeural"
+        RATE  = "+8%"   # closer to natural pace; less "news-ticker" than +15%
 
         async def _synth():
             communicate = edge_tts.Communicate(script, VOICE, rate=RATE)
@@ -415,8 +443,8 @@ def main():
     for t in titles:
         print(f"    - {t[:70]}")
 
-    # Safety guard: never publish a stub. 450 words ≈ 3.5 min, our floor.
-    if word_count < 450:
+    # Safety guard: never publish a stub. 600 words ≈ 4.5 min, our floor.
+    if word_count < 600:
         raise RuntimeError(
             f"Script too short ({word_count} words) — aborting so we don't "
             "publish a broken episode. Check the Gemini response above."
