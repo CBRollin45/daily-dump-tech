@@ -20,7 +20,7 @@ OUTPUT_DIR        = "output"
 FEED_DIR          = "docs"
 MEMORY_FILE       = "output/story_memory.json"
 
-PODCAST_TITLE       = "Daily Dump Tech"
+PODCAST_TITLE       = "Daily Dump: Tech"
 PODCAST_DESCRIPTION = "Fast daily tech news. No fluff. Five minutes."
 PODCAST_AUTHOR      = "Daily Dump Bot"
 PODCAST_BASE_URL    = os.environ.get(
@@ -231,7 +231,7 @@ def write_script_gemini(candidates: list) -> tuple:
 
     prompt = f"""Today is {today}.
 
-You are writing the script for a daily tech news podcast called Daily Dump Tech.
+You are writing the script for a daily tech news podcast called Daily Dump: Tech.
 It is modeled directly on the TLDR tech newsletter: written BY an engineer FOR
 engineers. Dense, factual, zero hype, zero hand-holding. The listener is a
 software engineer, security researcher, or founder who already knows the field.
@@ -335,6 +335,57 @@ Begin now:"""
         titles = [c["title"] for c in candidates[:HEADLINES_COUNT]]
 
     return script, titles
+
+
+def expand_script(short_script: str, target_low: int = 750) -> str:
+    """
+    Ask Gemini to lengthen a too-short script while preserving the TLDR voice.
+    Returns the expanded script (or the original if the call fails).
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return short_script
+
+    current = len(short_script.split())
+    prompt = f"""This tech news podcast script is too short. It's {current} words
+but must be at least {target_low} words.
+
+Expand it by adding more concrete technical detail to each of the five stories —
+specific numbers, version details, benchmark figures, names, and relevant context
+a technical listener would want. Do NOT add new stories. Do NOT add hype, filler,
+"why it matters" takeaways, or vague attributions. Keep the exact same dense,
+factual, engineer-to-engineer voice. Keep it as spoken prose with no markdown,
+bullets, or headers.
+
+Return ONLY the expanded script, nothing else.
+
+SCRIPT TO EXPAND:
+{short_script}"""
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash:generateContent?key={api_key}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature":      0.8,
+            "maxOutputTokens":  5000,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        parts = data["candidates"][0].get("content", {}).get("parts", [])
+        expanded = "".join(p.get("text", "") for p in parts).strip()
+        # Keep whichever is longer, just in case
+        if len(expanded.split()) > len(short_script.split()):
+            return expanded
+    except Exception as e:
+        print(f"  Expansion failed: {e}")
+    return short_script
 
 
 def text_to_speech(script: str, output_path: str) -> bool:
@@ -443,6 +494,13 @@ def main():
     for t in titles:
         print(f"    - {t[:70]}")
 
+    # If short, try to expand once before giving up
+    if word_count < 700:
+        print(f"  Under target — asking Gemini to expand...")
+        script = expand_script(script, target_low=750)
+        word_count = len(script.split())
+        print(f"  After expansion: {word_count} words (~{word_count // 130} min)")
+
     # Safety guard: never publish a stub. 600 words ≈ 4.5 min, our floor.
     if word_count < 600:
         raise RuntimeError(
@@ -463,7 +521,7 @@ def main():
 
     update_rss_feed(
         mp3_filename,
-        title       = f"Daily Dump Tech — {today_str}",
+        title       = f"Daily Dump: Tech — {today_str}",
         description = f"Five tech stories for {today_str}.",
         mp3_path    = mp3_path,
     )
