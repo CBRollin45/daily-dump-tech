@@ -18,5 +18,17 @@
   "9a0aea9bab3e": {
     "title": "Three AirDrop vulnerabilities discovered, with Apple working on a full fix",
     "date": "2026-07-01"
+  },
+  "6e4ab0a2c883": {
+    "title": "Git 2.55 Released With Rust Support Enabled By Default, git history fixup",
+    "date": "2026-07-01"
+  },
+  "fa04cd2fec9f": {
+    "title": "Apple Releases iOS 26.5.2 With Security Fixes",
+    "date": "2026-07-01"
+  },
+  "c42a11dc02f0": {
+    "title": "Cursor now has a mobile app for guiding your coding agent on the go",
+    "date": "2026-07-01"
   }
 }
