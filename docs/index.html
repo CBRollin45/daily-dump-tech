@@ -320,6 +320,23 @@
       border: 1px solid var(--border);
     }
 
+    .player-bar {
+      margin-top: 1.5rem;
+      padding: 1rem 1.25rem;
+      background: var(--card);
+      border: 1px solid var(--red);
+      border-radius: 4px;
+    }
+
+    .player-now-playing {
+      font-size: 0.8rem;
+      color: var(--red);
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 0.6rem;
+    }
+
     /* ── LISTEN ON ── */
     .listen-section {
       background: var(--dark);
@@ -470,12 +487,104 @@
 <section class="episodes-section" id="episodes">
   <div class="section-label">Latest Episodes</div>
 
-  <!-- This list is static — episodes appear here once the feed is live -->
-  <div class="episodes-placeholder">
-    Episodes will appear here once the feed is live.<br/>
-    Subscribe via Spotify or RSS to get new episodes automatically.
+  <!-- Episodes are loaded dynamically from feed.xml by the script below -->
+  <div id="episode-list" class="episode-list">
+    <div class="episodes-placeholder" id="episodes-loading">
+      Loading episodes…
+    </div>
+  </div>
+
+  <!-- Sticky audio player, hidden until an episode is played -->
+  <div id="player-bar" class="player-bar" style="display:none;">
+    <div class="player-info">
+      <div class="player-now-playing" id="player-title">—</div>
+    </div>
+    <audio id="audio-player" controls style="width:100%;"></audio>
   </div>
 </section>
+
+<script>
+  (async function loadEpisodes() {
+    const listEl    = document.getElementById('episode-list');
+    const loadingEl = document.getElementById('episodes-loading');
+    const playerBar = document.getElementById('player-bar');
+    const audioEl   = document.getElementById('audio-player');
+    const titleEl   = document.getElementById('player-title');
+
+    function fmtDate(d) {
+      if (isNaN(d)) return '';
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+    function fmtDuration(sec) {
+      if (!sec || isNaN(sec)) return '';
+      const m = Math.round(sec / 60);
+      return m + ' min';
+    }
+
+    try {
+      const res = await fetch('./feed.xml', { cache: 'no-store' });
+      if (!res.ok) throw new Error('feed not found');
+      const xmlText = await res.text();
+      const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
+      const items = Array.from(xml.querySelectorAll('item'));
+
+      if (items.length === 0) {
+        loadingEl.textContent = 'No episodes yet. Check back after the first run.';
+        return;
+      }
+
+      // Newest first
+      const episodes = items.map(item => {
+        const title    = item.querySelector('title')?.textContent || 'Episode';
+        const desc      = item.querySelector('description')?.textContent || '';
+        const pubDate  = new Date(item.querySelector('pubDate')?.textContent || '');
+        const enclosure = item.querySelector('enclosure');
+        const url      = enclosure ? enclosure.getAttribute('url') : '';
+        const durNode  = item.getElementsByTagName('itunes:duration')[0];
+        const dur      = durNode ? parseInt(durNode.textContent, 10) : 0;
+        return { title, desc, pubDate, url, dur };
+      }).sort((a, b) => b.pubDate - a.pubDate);
+
+      listEl.innerHTML = '';
+
+      episodes.forEach((ep, i) => {
+        const row = document.createElement('div');
+        row.className = 'episode';
+        row.innerHTML = `
+          <div class="episode-play" role="button" tabindex="0" aria-label="Play episode">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="var(--red)"><path d="M8 5v14l11-7z"/></svg>
+          </div>
+          <div class="episode-info">
+            <div class="episode-title"></div>
+            <div class="episode-date"></div>
+          </div>
+          <div class="episode-duration"></div>
+        `;
+        row.querySelector('.episode-title').textContent = ep.title;
+        row.querySelector('.episode-date').textContent  = fmtDate(ep.pubDate);
+        row.querySelector('.episode-duration').textContent = fmtDuration(ep.dur);
+
+        function play() {
+          if (!ep.url) return;
+          audioEl.src = ep.url;
+          titleEl.textContent = ep.title;
+          playerBar.style.display = 'block';
+          audioEl.play();
+          playerBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+        const playBtn = row.querySelector('.episode-play');
+        playBtn.addEventListener('click', play);
+        playBtn.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); }
+        });
+
+        listEl.appendChild(row);
+      });
+    } catch (err) {
+      loadingEl.textContent = 'Could not load episodes yet. The feed appears after the first successful run.';
+    }
+  })();
+</script>
 
 <!-- LISTEN ON -->
 <div class="listen-section">
