@@ -159,7 +159,7 @@ def fetch_headlines(feeds: list, count: int, memory: dict) -> list[dict]:
 
 
 def write_script_gemini(headlines: list) -> str:
-    """Use Gemini 1.5 Flash (free tier) to write the podcast script."""
+    """Use Gemini 2.5 Flash (free tier) to write the podcast script."""
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable not set")
