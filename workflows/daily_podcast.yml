@@ -1,0 +1,54 @@
+name: Generate Daily Dump Tech
+
+on:
+  schedule:
+    # 5am EDT (summer) = 09:00 UTC
+    # Change to '0 10 * * *' in November for EST (winter)
+    - cron: '0 9 * * *'
+  workflow_dispatch:  # manual trigger from Actions tab
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate podcast episode
+        env:
+          GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
+          PODCAST_BASE_URL: ${{ secrets.PODCAST_BASE_URL }}
+        run: python generate_podcast.py
+
+      - name: Move MP3 to docs/episodes for GitHub Pages
+        run: |
+          mkdir -p docs/episodes
+          mv output/*.mp3 docs/episodes/ || true
+
+      - name: Commit everything (RSS feed, MP3, memory, transcript)
+        run: |
+          git config --global user.name  "Daily Dump Bot"
+          git config --global user.email "bot@dailydump.local"
+          git add docs/
+          git add output/story_memory.json || true
+          git add output/*.txt || true
+          git diff --staged --quiet || git commit -m "Daily Dump Tech — $(date +%Y-%m-%d)"
+          git push
+
+      - name: Upload transcript as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript-${{ github.run_id }}
+          path: output/*.txt
+          retention-days: 14
