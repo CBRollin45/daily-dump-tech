@@ -8,6 +8,7 @@ GitHub Pages RSS feed.
 
 import os
 import re
+import sys
 import json
 import hashlib
 import datetime
@@ -259,47 +260,77 @@ def gather_candidates(memory: dict) -> list:
             "and network access to the RSS feeds."
         )
 
-    # Group near-duplicate stories across sources using word-overlap similarity.
-    # Track "source_count" = how many outlets carried each story.
+    # Group near-duplicate stories across sources. Different outlets word their
+    # headlines very differently for the SAME event, so title-only matching misses
+    # them. We match on significant words from the title AND summary combined, and
+    # also treat stories that share a distinctive entity (a capitalized product or
+    # company name) as the same story.
     STOPWORDS = {
         "the", "a", "an", "to", "of", "in", "on", "for", "with", "and", "or",
         "at", "by", "is", "are", "as", "new", "now", "its", "it", "this", "that",
         "from", "has", "have", "will", "after", "over", "into", "up", "out",
+        "how", "why", "what", "when", "who", "your", "you", "here", "gets",
+        "could", "would", "says", "said", "than", "but", "not", "all", "can",
     }
 
-    def sig_words(title):
+    def sig_words(text):
         return {
-            w for w in _norm_title(title).split()
+            w for w in _norm_title(text).split()
             if w not in STOPWORDS and len(w) > 2
         }
 
-    groups = []  # list of {title, summary, source_count, _words}
+    def entities(raw_title):
+        # Distinctive tokens: capitalized words in the ORIGINAL title (product /
+        # company names), lowercased for comparison. These are strong same-story
+        # signals ("OpenAI", "GPT", "Nvidia", "iPhone").
+        found = set()
+        for tok in re.findall(r"[A-Za-z0-9]+", raw_title):
+            if len(tok) > 2 and (tok[0].isupper() or any(c.isupper() for c in tok[1:])):
+                low = tok.lower()
+                if low not in STOPWORDS:
+                    found.add(low)
+        return found
+
+    groups = []  # {title, summary, source_count, _words, _ents}
     for a in combined:
-        words = sig_words(a["title"])
+        blob   = f"{a['title']} {a.get('summary', '')}"
+        words  = sig_words(blob)
+        ents   = entities(a["title"])
         if not words:
             continue
         matched = None
         for grp in groups:
             overlap = words & grp["_words"]
-            # Same story if they share enough significant words
             smaller = min(len(words), len(grp["_words"]))
-            if smaller and len(overlap) / smaller >= 0.6:
+            word_sim = (len(overlap) / smaller) if smaller else 0
+            # Shared distinctive entities (need 2+ shared, or 1 rare one)
+            shared_ents = ents & grp["_ents"]
+            # Same story if: strong word overlap, OR they share key entities
+            # AND have at least modest word overlap (guards against false merges
+            # like two unrelated "Apple" stories).
+            if word_sim >= 0.55 or (len(shared_ents) >= 2 and word_sim >= 0.3):
                 matched = grp
                 break
         if matched:
             matched["source_count"] += 1
+            matched["_words"] |= words
+            matched["_ents"]  |= ents
             if len(a.get("summary", "")) > len(matched.get("summary", "")):
                 matched["summary"] = a["summary"]
-                matched["title"]   = a["title"]  # keep the fuller headline too
+                matched["title"]   = a["title"]
         else:
             groups.append({
                 "title":        a["title"],
                 "summary":      a.get("summary", ""),
                 "source_count": 1,
                 "_words":       words,
+                "_ents":        ents,
             })
 
-    unique = [{k: v for k, v in g.items() if k != "_words"} for g in groups]
+    unique = [
+        {k: v for k, v in g.items() if k not in ("_words", "_ents")}
+        for g in groups
+    ]
 
     # Filter recently-covered unless update signal present
     fresh, skipped = [], []
@@ -365,14 +396,23 @@ notes, not documentation.
 
 Below are {len(candidates)} candidate stories.
 
+STEP 0 — MERGE DUPLICATES FIRST:
+Several candidates may be the SAME underlying event reported by different outlets
+with different headlines (e.g. "OpenAI unveils GPT-5", "GPT-5 is here", "Sam Altman
+announces new model" are ONE story). Before anything else, mentally group these.
+Treat each real-world event as a SINGLE story — never cover the same event twice
+just because it appears multiple times in the list. When you write it up, combine
+the details from all the duplicate entries into one segment.
+
 STEP 1 — SCORE EACH STORY FOR NOTEWORTHINESS (think like a sharp tech editor):
 Before choosing anything, evaluate each candidate against these questions. This is
 how you find quality signal instead of routine noise:
 
-  1. NOVELTY: Is this genuinely new, or is it a routine, expected event? Recurring
-     maintenance — minor OS point-releases, routine security-patch roundups, "X app
-     gets small update", weekly deal posts — is NOT noteworthy even when many outlets
-     cover it. Those outlets cover it out of routine, not because it matters.
+  1. NOVELTY: Is this genuinely new and recent, or a routine, expected, or already-
+     old event? Prefer fresh, breaking developments over stories that have been
+     circulating for days. Recurring maintenance — minor OS point-releases, routine
+     security-patch roundups, "X app gets small update", weekly deal posts — is NOT
+     noteworthy even when many outlets cover it. Those outlets cover it out of routine.
   2. CONSEQUENCE: Does it change something? A new capability, a shift in the market,
      a real vulnerability being exploited, a product that didn't exist yesterday, money
      actually moving. If nothing is different afterward, it's not a story.
@@ -430,6 +470,21 @@ TALK LIKE A HOST, NOT LIKE DOCUMENTATION:
   git status on Windows." Then move on.
 - Give the ONE or TWO details that matter, not all ten.
 
+DO NOT EXPLAIN THINGS THE AUDIENCE ALREADY KNOWS — THIS IS CRITICAL:
+Never waste words explaining common concepts, obvious terms, or general background.
+Your listener is technical. They already know what things mean.
+- BAD: "The tool is called Nano Banana 2 Lite. The 'Lite' likely means it's a
+  smaller, faster, more efficient version." — This is padding. Everyone knows what
+  Lite means. It adds zero information.
+- GOOD: "Google shipped Nano Banana 2 Lite — a faster, cheaper image model that
+  runs at [whatever the actual news is: its real specs, price, benchmark, or use case]."
+- Every sentence must carry NEW information pulled from the actual reporting: what
+  shipped, the numbers, who's affected, what's different. If a sentence only restates
+  the obvious or defines a word, DELETE it and replace it with a real detail from the
+  sources. Filler explanations are the #1 thing that makes this sound like an AI. Use
+  the details in the story summaries provided — that's your source material, draw the
+  substance from there rather than inventing generic explanation.
+
 NO SYMBOLS, CODE, OR PATHS — CRITICAL FOR AUDIO:
 This is read aloud by text-to-speech. It must contain ZERO of the following:
 - No backticks, no code snippets, no function names, no file paths, no crate names
@@ -446,14 +501,25 @@ VOICE:
 - Do NOT add "why this matters" sermons or vague attributions ("reports say").
 - Ban these words: exciting, fascinating, groundbreaking, revolutionary, game-changer,
   buckle up, let's dive in, stay tuned, it's worth noting, interestingly, notably.
-- Minimal natural transitions between stories (Meanwhile, Elsewhere, In security).
+
+TRANSITIONS — START EACH NEW STORY WITH A CLEAR CUE:
+Every story after the first one must OPEN with a short spoken transition so the
+listener clearly hears a new subject is starting. VARY it — do not reuse the same
+one twice in an episode. Pick ones that fit the story's topic. Examples to draw from
+(and invent similar ones):
+  "Next," / "Moving on," / "Elsewhere," / "Meanwhile," / "Also today,"
+  "In AI," / "On the AI side," / "In chips," / "In security," / "In Apple news,"
+  "Over at [company]," / "Switching gears," / "Turning to [topic],"
+The FINAL story must start with "Finally," so the listener knows it's the last one.
+The opener line and the first story do NOT get a transition (the opener leads
+straight into story one).
 
 FORMAT:
 - Spoken prose only. No markdown, bullets, asterisks, or headers.
 - Don't name the news outlets. Don't start sentences with "today" or "here's".
 - OPENER: start with exactly this line, filling in the real date:
   "It's [Month Day]. This is your Daily Dump of tech news."
-- CLOSER: end with exactly this line: "And that's your Daily Dump."
+- CLOSER: end with exactly this line: "And that's it for your Daily Dump. See you again, tomorrow."
 - BETWEEN STORIES: put the marker [[PAUSE]] on its own line between each story
   (after you finish one story, before you start the next). This signals a beat of
   silence so the listener hears a clear break between subjects. Do NOT put a pause
@@ -617,9 +683,12 @@ def text_to_speech(script: str, output_path: str) -> bool:
             segments = [cleaned]
 
         # Pull the closing sign-off out of the last segment so we can slow it down.
-        # Matches "And that's your Daily Dump." (with or without punctuation/case).
+        # Matches "And that's it for your Daily Dump. See you again, tomorrow."
         closer = None
-        closer_pat = re.compile(r"(and that'?s your daily dump[.!]?)\s*$", re.IGNORECASE)
+        closer_pat = re.compile(
+            r"(and that'?s it for your daily dump\.?\s*see you again,?\s*tomorrow[.!]?)\s*$",
+            re.IGNORECASE,
+        )
         if segments:
             m = closer_pat.search(segments[-1])
             if m:
@@ -647,12 +716,35 @@ def text_to_speech(script: str, output_path: str) -> bool:
                 print(f"    {label} retry {attempt+1}...")
             return audio
 
+        async def _make_silence() -> bytes:
+            # Generate a real silent gap in the SAME MP3 format as the segments so
+            # it concatenates cleanly (no ffmpeg needed). Commas are read as pauses,
+            # not spoken, so a short comma string yields near-silent audio. We cap
+            # the size we'll accept: a genuine silent clip is small; if it comes
+            # back large the voice spoke something, so we discard it. Falls back to
+            # no gap rather than breaking the episode.
+            try:
+                clip = await _synth_segment("  ,  ,  ,  ,  ,  ", "+0%")
+                # ~1-2s of 24kbps silence ≈ 3000-7000 bytes. Reject anything huge.
+                if 200 < len(clip) < 12000:
+                    return clip
+                return b""
+            except Exception:
+                return b""
+
         async def _run() -> bytes:
+            gap = await _make_silence()
             out = bytearray()
             for i, seg in enumerate(segments):
                 out.extend(await _render(seg, RATE, f"segment {i+1}"))
+                # Insert a clear pause between stories (not after the last segment)
+                is_last_body = (i == len(segments) - 1)
+                if not is_last_body and gap:
+                    out.extend(gap)
             if closer:
-                # Small pause before the closer, then the slower sign-off.
+                # A pause before the closer too, then the slower sign-off.
+                if gap:
+                    out.extend(gap)
                 out.extend(await _render(closer, CLOSER_RATE, "closer"))
             return bytes(out)
 
@@ -759,6 +851,12 @@ def update_rss_feed(mp3_filename: str, title: str, description: str, mp3_path: s
 
 
 def main():
+    # --fresh (or --test): testing mode. Ignores story memory so you can
+    # regenerate repeatedly on the same day and get different story picks, and
+    # does NOT write to memory (so it won't affect real daily runs). Also
+    # nudges candidate ordering so Gemini doesn't keep landing on the same set.
+    FRESH = ("--fresh" in sys.argv) or ("--test" in sys.argv)
+
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -766,14 +864,29 @@ def main():
     mp3_path     = os.path.join(OUTPUT_DIR, mp3_filename)
     script_path  = os.path.join(OUTPUT_DIR, f"daily-dump-tech-{today_str}.txt")
 
+    if FRESH:
+        print("[TEST MODE] --fresh: ignoring memory, won't save memory, "
+              "randomizing candidate order")
+
     print(f"[{today_str}] Loading story memory...")
     memory = load_memory()
     memory = purge_old_memory(memory, days=14)
     print(f"  {len(memory)} stories in memory")
 
+    # In fresh/test mode, pretend memory is empty for filtering purposes so all
+    # stories are eligible and we're not stuck with the same leftovers.
+    filter_memory = {} if FRESH else memory
+
     print(f"[{today_str}] Fetching news from NewsAPI + GNews...")
-    candidates = gather_candidates(memory)
+    candidates = gather_candidates(filter_memory)
     print(f"  {len(candidates)} candidate stories after filtering")
+
+    if FRESH:
+        # Shuffle so Gemini sees a different ordering each run and doesn't keep
+        # gravitating to the same top-of-list stories.
+        import random
+        random.shuffle(candidates)
+        print("  [TEST MODE] candidate order randomized")
 
     # Dynamic ceiling: cap at MAX_STORIES, but lower it if the news pool is thin.
     # Roughly: allow 1 story per ~3 candidates, clamped to [MIN_STORIES, MAX_STORIES].
@@ -831,9 +944,12 @@ def main():
         mp3_path    = mp3_path,
     )
 
-    memory = mark_covered(titles, memory)
-    save_memory(memory)
-    print(f"  Memory updated → {len(memory)} stories tracked")
+    if FRESH:
+        print("  [TEST MODE] skipping memory save (won't affect real runs)")
+    else:
+        memory = mark_covered(titles, memory)
+        save_memory(memory)
+        print(f"  Memory updated → {len(memory)} stories tracked")
     print("Done.")
 
 
