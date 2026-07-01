@@ -18,7 +18,9 @@ import requests
 MIN_STORIES       = 3          # never fewer than this
 MAX_STORIES       = 7          # never more than this
 CANDIDATE_POOL    = 40         # how many headlines to gather before picking
-STORY_MEMORY_DAYS = 3
+STORY_MEMORY_DAYS = 30         # don't repeat a story within this window unless it
+                               # has a genuinely significant new development (judged
+                               # by the AI, not keyword matching)
 OUTPUT_DIR        = "output"
 FEED_DIR          = "docs"
 MEMORY_FILE       = "output/story_memory.json"
@@ -45,16 +47,6 @@ PODCAST_AUTHOR      = "Daily Dump Bot"
 PODCAST_BASE_URL    = os.environ.get(
     "PODCAST_BASE_URL", "https://example.github.io/daily-dump-tech"
 )
-
-# Update-signal words: let a recently-covered story back in if its headline
-# suggests a genuinely new development.
-UPDATE_SIGNALS = {
-    "update", "updated", "breaking", "breaks", "launches", "launched",
-    "announces", "announced", "confirms", "confirmed", "reveals",
-    "raises", "acquires", "acquired", "banned", "bans", "fined",
-    "sues", "sued", "ruling", "recall", "recalls", "breach", "hacked",
-    "hack", "layoffs", "fired", "resigns", "shuts", "settles",
-}
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -332,21 +324,35 @@ def gather_candidates(memory: dict) -> list:
         for g in groups
     ]
 
-    # Filter recently-covered unless update signal present
-    fresh, skipped = [], []
+    # Separate never-covered stories (always eligible) from recently-covered ones.
+    # We do NOT use keyword matching to decide if a repeat is allowed — that's
+    # unreliable. Instead we FLAG recently-covered stories and let the AI judge
+    # (in the selection prompt) whether there's a significant NEW development that
+    # justifies re-covering. Stories never covered pass through untouched.
+    fresh, recently_covered = [], []
     for a in unique:
-        words = set(a["title"].lower().replace(",", " ").replace(".", " ").split())
-        has_signal = bool(words & UPDATE_SIGNALS)
-        if was_recently_covered(a["title"], memory) and not has_signal:
-            skipped.append(a["title"])
+        if was_recently_covered(a["title"], memory):
+            key = story_key(a["title"])
+            prior = memory.get(key, {})
+            a["_prior_date"] = prior.get("date", "")
+            a["_prior_title"] = prior.get("title", "")
+            recently_covered.append(a)
         else:
             fresh.append(a)
 
-    if skipped:
-        print(f"  Skipped {len(skipped)} recently covered stories")
+    if recently_covered:
+        print(f"  {len(recently_covered)} stories were covered in the last "
+              f"{STORY_MEMORY_DAYS} days — flagged for AI to judge if there's a "
+              f"significant update")
 
-    # Sort by how many sources covered it (importance signal), highest first
+    # Sort fresh by cross-source coverage (importance signal), highest first
     fresh.sort(key=lambda x: x["source_count"], reverse=True)
+
+    # Recently-covered candidates go at the END of the pool, clearly marked, so
+    # the AI sees them but treats them as repeats to be judged, not new stories.
+    for a in recently_covered:
+        a["_is_repeat"] = True
+    fresh_all = fresh + recently_covered
 
     # Report the strongest cross-source stories
     multi = [f for f in fresh if f["source_count"] > 1]
@@ -354,6 +360,8 @@ def gather_candidates(memory: dict) -> list:
         print(f"  {len(multi)} stories covered by multiple sources (higher importance):")
         for f in multi[:5]:
             print(f"    [{f['source_count']}x] {f['title'][:60]}")
+
+    fresh = fresh_all
 
     # Backfill if too few fresh stories
     if len(fresh) < MIN_STORIES:
@@ -381,9 +389,14 @@ def write_script_gemini(candidates: list, max_stories: int) -> tuple:
 
     today = datetime.date.today().strftime("%B %d, %Y")
 
+    def _fmt_candidate(i, c):
+        tag = f"[{c.get('source_count', 1)} source(s)]"
+        if c.get("_is_repeat"):
+            tag += f" [ALREADY COVERED on {c.get('_prior_date', '?')} — only re-cover if genuinely significant NEW development]"
+        return f"{i+1}. {tag} {c['title']}: {c['summary']}"
+
     candidate_block = "\n".join(
-        f"{i+1}. [{c.get('source_count', 1)} source(s)] {c['title']}: {c['summary']}"
-        for i, c in enumerate(candidates)
+        _fmt_candidate(i, c) for i, c in enumerate(candidates)
     )
 
     prompt = f"""Today is {today}.
@@ -403,6 +416,15 @@ announces new model" are ONE story). Before anything else, mentally group these.
 Treat each real-world event as a SINGLE story — never cover the same event twice
 just because it appears multiple times in the list. When you write it up, combine
 the details from all the duplicate entries into one segment.
+
+REPEATS — DO NOT RE-COVER OLD NEWS UNLESS THERE'S A REAL UPDATE:
+Some candidates are marked "[ALREADY COVERED on <date>]". These were in a recent
+episode. Do NOT cover them again UNLESS the current reporting shows a genuinely
+significant NEW development since then — not just the same story still circulating,
+and not a trivial follow-up. Judge significance by substance: a major new fact, a
+resolution, a big escalation, real new numbers, a reversal. If it's just the same
+story being re-reported with nothing materially new, SKIP it — the listener already
+heard it. When in doubt, skip it. Prefer genuinely fresh stories over any repeat.
 
 STEP 1 — SCORE EACH STORY FOR NOTEWORTHINESS (think like a sharp tech editor):
 Before choosing anything, evaluate each candidate against these questions. This is
@@ -458,32 +480,49 @@ how big a deal they actually are to a technical audience.
 This variation in length is what makes it sound like a real host with judgment,
 not a machine giving everything equal weight.
 
-TALK LIKE A HOST, NOT LIKE DOCUMENTATION:
-- Explain what changed and why an engineer would care — at the altitude a smart
-  person wants while half-listening on a commute. NOT an exhaustive changelog.
-- BAD (do not do this): listing every crate, function name, syscall, config flag,
-  or percentage from a release. Nobody wants to hear "the gix-pack cache delta
-  decode crate" read aloud.
-- GOOD: "Git 2.55 is out, and the headline is Rust support is now on by default —
-  part of the slow migration away from C for memory safety. There's also a fix for
-  interactive rebase that was mangling merge commits, and some solid speedups for
-  git status on Windows." Then move on.
-- Give the ONE or TWO details that matter, not all ten.
+WHAT COUNTS AS SIGNAL VS NOISE — THE MOST IMPORTANT PRINCIPLE:
+The source articles are written by journalists who pad stories with narrative color:
+anecdotes about individuals, quoted reactions, "one user tried X", human-interest
+framing, and explanations of basic concepts. To a technical listener, that color is
+NOISE — it carries zero information. Your job is to extract the SIGNAL and throw the
+rest away. Before including ANY fact, ask: "Does this change what a knowledgeable
+engineer knows or thinks?" If yes, include it. If it's just flavor, cut it.
 
-DO NOT EXPLAIN THINGS THE AUDIENCE ALREADY KNOWS — THIS IS CRITICAL:
-Never waste words explaining common concepts, obvious terms, or general background.
-Your listener is technical. They already know what things mean.
-- BAD: "The tool is called Nano Banana 2 Lite. The 'Lite' likely means it's a
-  smaller, faster, more efficient version." — This is padding. Everyone knows what
-  Lite means. It adds zero information.
-- GOOD: "Google shipped Nano Banana 2 Lite — a faster, cheaper image model that
-  runs at [whatever the actual news is: its real specs, price, benchmark, or use case]."
-- Every sentence must carry NEW information pulled from the actual reporting: what
-  shipped, the numbers, who's affected, what's different. If a sentence only restates
-  the obvious or defines a word, DELETE it and replace it with a real detail from the
-  sources. Filler explanations are the #1 thing that makes this sound like an AI. Use
-  the details in the story summaries provided — that's your source material, draw the
-  substance from there rather than inventing generic explanation.
+SIGNAL (include) — facts that change the listener's model of the world:
+  what shipped or happened, hard numbers (price, performance, funding, users affected),
+  capabilities gained or lost, benchmarks, what it competes with, what breaks, who's
+  affected at scale, the actual consequence.
+
+NOISE (cut, even though it's in the source) — narrative color that informs no one:
+  - Anecdotes about a specific person: "one developer used it to make an image of X",
+    "a user on social media said", "someone built a demo that". Nobody cares what one
+    random person did with it. Report the CAPABILITY, not the anecdote.
+  - Reactions and sentiment: "users are excited", "the community is divided",
+    "reviewers praised it". Report what it DOES, not how people feel about it.
+  - Explanations of things the audience knows: defining common terms, spelling out
+    what "Lite" or "beta" or "open source" means. Cut entirely.
+  - Vague attributions: "reports suggest", "sources say", "it's rumored".
+
+WORKED EXAMPLES:
+- Source says: "Google's Nano Banana 2 Lite is a lighter version of its image model.
+  One developer on X used it to generate a photorealistic cat in under a second."
+  BAD (relays the anecdote): "Google released Nano Banana 2 Lite, and one developer
+  used it to create a photorealistic cat image."
+  GOOD (extracts the signal): "Google shipped Nano Banana 2 Lite — a smaller image
+  model that generates in under a second, aimed at cheap, low-latency use."
+  (The "under a second" is signal — it's a real capability. The specific cat and the
+  specific developer are noise.)
+
+TALK LIKE A HOST, NOT LIKE DOCUMENTATION:
+- Explain what changed and why an engineer would care — at the altitude a smart person
+  wants while half-listening on a commute. NOT an exhaustive changelog.
+- BAD: listing every crate, function name, syscall, config flag, or percentage from a
+  release. Nobody wants to hear "the gix-pack cache delta decode crate" read aloud.
+- GOOD: "Git 2.55 is out, and the headline is Rust support is now on by default — part
+  of the slow migration away from C for memory safety. There's also a fix for
+  interactive rebase that was mangling merge commits." Then move on.
+- Give the ONE or TWO details that matter, not all ten. And no hype words (exciting,
+  fascinating, groundbreaking, revolutionary, game-changer).
 
 NO SYMBOLS, CODE, OR PATHS — CRITICAL FOR AUDIO:
 This is read aloud by text-to-speech. It must contain ZERO of the following:
@@ -630,6 +669,64 @@ SCRIPT TO EXPAND:
     return short_script
 
 
+def tighten_script(long_script: str, target_high: int = 820) -> str:
+    """
+    Ask Gemini to trim an over-long script back toward the target while keeping
+    the same voice, all the stories, the opener/closer, and the [[PAUSE]] markers.
+    Returns the tightened script (or the original if the call fails).
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return long_script
+
+    current = _script_wordcount(long_script)
+    prompt = f"""This tech news podcast script is too long. It's {current} words
+but should be about {target_high} words for a 5-minute episode.
+
+Tighten it by cutting filler, redundant explanation, and any sentence that just
+restates something obvious or defines a common term. Keep ALL the same stories.
+Keep the exact opener and closer lines. Keep the [[PAUSE]] markers between stories.
+Keep the transition cues that start each story. Do NOT drop a whole story. Just make
+each write-up leaner. Keep the same conversational engineer-to-engineer voice.
+Spoken prose only, no markdown.
+
+Return ONLY the tightened script, nothing else.
+
+SCRIPT TO TIGHTEN:
+{long_script}"""
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash:generateContent?key={api_key}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature":      0.7,
+            "maxOutputTokens":  5000,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        parts = data["candidates"][0].get("content", {}).get("parts", [])
+        tightened = "".join(p.get("text", "") for p in parts).strip()
+        # Only accept if it actually got shorter but didn't collapse
+        if 400 < _script_wordcount(tightened) < current:
+            return tightened
+    except Exception as e:
+        print(f"  Tighten failed: {e}")
+    return long_script
+
+
+def _script_wordcount(s: str) -> int:
+    """Word count excluding [[PAUSE]] markers."""
+    import re
+    return len(re.sub(r"\[\[\s*PAUSE\s*\]\]", " ", s, flags=re.IGNORECASE).split())
+
+
 def clean_for_speech(script: str) -> str:
     """
     Safety net: strip characters and patterns that sound broken when read aloud
@@ -716,33 +813,28 @@ def text_to_speech(script: str, output_path: str) -> bool:
                 print(f"    {label} retry {attempt+1}...")
             return audio
 
-        async def _make_silence() -> bytes:
-            # Generate a real silent gap in the SAME MP3 format as the segments so
-            # it concatenates cleanly (no ffmpeg needed). Commas are read as pauses,
-            # not spoken, so a short comma string yields near-silent audio. We cap
-            # the size we'll accept: a genuine silent clip is small; if it comes
-            # back large the voice spoke something, so we discard it. Falls back to
-            # no gap rather than breaking the episode.
-            try:
-                clip = await _synth_segment("  ,  ,  ,  ,  ,  ", "+0%")
-                # ~1-2s of 24kbps silence ≈ 3000-7000 bytes. Reject anything huge.
-                if 200 < len(clip) < 12000:
-                    return clip
-                return b""
-            except Exception:
-                return b""
+        # Load a short pre-made silent MP3 for the gap between stories. It's a
+        # single small file bundled in the repo (docs/silence.mp3, ~0.8s). Using a
+        # fixed file keeps the gap length exact and predictable — no synthesis
+        # surprises that could balloon the runtime. Missing file → no gap.
+        gap = b""
+        for cand in (os.path.join(FEED_DIR, "silence.mp3"), "silence.mp3"):
+            if os.path.exists(cand):
+                try:
+                    with open(cand, "rb") as sf:
+                        gap = sf.read()
+                    break
+                except Exception:
+                    gap = b""
 
         async def _run() -> bytes:
-            gap = await _make_silence()
             out = bytearray()
             for i, seg in enumerate(segments):
                 out.extend(await _render(seg, RATE, f"segment {i+1}"))
-                # Insert a clear pause between stories (not after the last segment)
                 is_last_body = (i == len(segments) - 1)
                 if not is_last_body and gap:
                     out.extend(gap)
             if closer:
-                # A pause before the closer too, then the slower sign-off.
                 if gap:
                     out.extend(gap)
                 out.extend(await _render(closer, CLOSER_RATE, "closer"))
@@ -870,7 +962,7 @@ def main():
 
     print(f"[{today_str}] Loading story memory...")
     memory = load_memory()
-    memory = purge_old_memory(memory, days=14)
+    memory = purge_old_memory(memory, days=45)
     print(f"  {len(memory)} stories in memory")
 
     # In fresh/test mode, pretend memory is empty for filtering purposes so all
@@ -906,14 +998,22 @@ def main():
     print(f"  Stories chosen: {n_stories}")
     for t in titles:
         print(f"    - {t[:70]}")
-    print(f"  Script: {word_count} words (~{word_count // 130} min)")
+    print(f"  Script: {word_count} words (~{word_count * 60 // 165}s at pace)")
 
     # Always aim for ~5 minutes. At +12% speed that's ~790 words. Expand if short.
     if word_count < 740:
         print(f"  Under 5-min target — asking Gemini to expand...")
         script = expand_script(script, target_low=790)
         word_count = _wc(script)
-        print(f"  After expansion: {word_count} words (~{word_count // 165} min)")
+        print(f"  After expansion: {word_count} words")
+
+    # If WAY over (would run long), ask Gemini to tighten back toward target.
+    # ~950 words ≈ 5:45+ at +12%, which is too long for a "5-minute" episode.
+    if word_count > 950:
+        print(f"  Over 5-min target ({word_count}w) — asking Gemini to tighten...")
+        script = tighten_script(script, target_high=820)
+        word_count = _wc(script)
+        print(f"  After tighten: {word_count} words")
 
     # Absolute stub guard: below this, something is genuinely broken.
     if word_count < 450:
