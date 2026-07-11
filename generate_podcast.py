@@ -15,8 +15,8 @@ import datetime
 import requests
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-MIN_STORIES       = 3          # never fewer than this
-MAX_STORIES       = 7          # never more than this
+MIN_STORIES       = 4          # never fewer than this
+MAX_STORIES       = 10         # denser format fits more stories in 5 min
 CANDIDATE_POOL    = 40         # how many headlines to gather before picking
 STORY_MEMORY_DAYS = 30         # don't repeat a story within this window unless it
                                # has a genuinely significant new development (judged
@@ -28,17 +28,17 @@ MEMORY_FILE       = "output/story_memory.json"
 # Top tech publications — the same kind of sources TLDR curates from.
 # These give wide coverage + a cross-source importance signal (a story covered
 # by several outlets is probably a bigger deal).
+# Source diet aimed at a tech-savvy (not necessarily engineer) audience: strong
+# general tech outlets first, a lighter touch of developer/security sources so the
+# pool isn't flooded with in-the-weeds tooling or routine security noise.
 RSS_FEEDS = [
     "https://techcrunch.com/feed/",
     "https://www.theverge.com/rss/index.xml",
     "https://feeds.arstechnica.com/arstechnica/index",
     "https://www.wired.com/feed/rss",
-    "https://hnrss.org/frontpage?points=150",   # Hacker News, 150+ points = high signal
     "https://www.engadget.com/rss.xml",
-    "https://www.theregister.com/headlines.atom",
-    "https://simonwillison.net/atom/everything/",  # top AI/LLM practitioner blog
-    "https://feeds.feedburner.com/TheHackersNews",  # security
-    "https://www.bleepingcomputer.com/feed/",        # security
+    "https://hnrss.org/frontpage?points=300",  # Hacker News, 300+ pts = only the biggest
+    "https://www.bleepingcomputer.com/feed/",   # security (kept to one, for major breaches)
 ]
 
 PODCAST_TITLE       = "Daily Dump: Tech"
@@ -495,10 +495,12 @@ def write_script_gemini(candidates: list, max_stories: int) -> tuple:
     prompt = f"""Today is {today}.
 
 You are writing the script for a daily tech news podcast called Daily Dump: Tech.
-It's modeled on the TLDR tech newsletter: written BY an engineer FOR engineers.
-Smart, factual, conversational, zero hype. The listener is a developer or founder
-who knows the field. This is a PODCAST people listen to on a commute — not release
-notes, not documentation.
+The listener is TECH-SAVVY BUT NOT NECESSARILY A WORKING ENGINEER — someone who
+follows tech closely and wants to stay informed on what's actually happening in the
+industry. Think: the important tech stories an informed person would want to know
+about and might bring up with a colleague. NOT a developer changelog, NOT deep
+in-the-weeds tooling detail, but also NOT dumbed-down consumer fluff. Smart, factual,
+fast, zero hype. This is a briefing people listen to on a commute.
 
 Below are {len(candidates)} candidate stories.
 
@@ -519,35 +521,49 @@ resolution, a big escalation, real new numbers, a reversal. If it's just the sam
 story being re-reported with nothing materially new, SKIP it — the listener already
 heard it. When in doubt, skip it. Prefer genuinely fresh stories over any repeat.
 
-STEP 1 — SCORE EACH STORY FOR NOTEWORTHINESS (think like a sharp tech editor):
-Before choosing anything, evaluate each candidate against these questions. This is
-how you find quality signal instead of routine noise:
+STEP 1 — THE BAR: WHAT MAKES A STORY WORTH INCLUDING
+For each candidate, apply this three-part test. The strongest stories pass all three;
+be skeptical of anything that clearly fails one.
+  1. TALKABLE: Would a tech-savvy person actually bring this up with a colleague or
+     friend? Is it interesting on its own, not just trade-industry housekeeping?
+  2. BROADLY MATTERS: Does it affect or matter to a LOT of people — not just the ops
+     team at one big company? Impact and reach, not niche relevance.
+  3. GENUINELY NEW / A REAL CHANGE: Is this a first, a launch, a real shift — not a
+     routine, recurring, or expected event?
 
-  1. NOVELTY: Is this genuinely new and recent, or a routine, expected, or already-
-     old event? Prefer fresh, breaking developments over stories that have been
-     circulating for days. Recurring maintenance — minor OS point-releases, routine
-     security-patch roundups, "X app gets small update", weekly deal posts — is NOT
-     noteworthy even when many outlets cover it. Those outlets cover it out of routine.
-  2. CONSEQUENCE: Does it change something? A new capability, a shift in the market,
-     a real vulnerability being exploited, a product that didn't exist yesterday, money
-     actually moving. If nothing is different afterward, it's not a story.
-  3. SURPRISE / INFORMATION: Would a knowledgeable engineer already assume this happened?
-     "Apple shipped a bug-fix update" carries near-zero information — everyone knows Apple
-     constantly ships those. "Apple shipped an emergency patch for a zero-day being actively
-     exploited" carries real information. Same category, totally different noteworthiness.
-  4. DEPTH AVAILABLE: Is there enough substance to actually talk about for a minute, or
-     would you just be reading the headline back?
+WHAT TO INCLUDE (with the calibration you should use):
+- New AI models and major AI product releases (a new OpenAI/Google/Anthropic model = yes).
+- Major tech business, legal, and culture news IF it's big: a major company suing
+  another (Apple v. OpenAI = yes), a landmark acquisition, a major exec/company shakeup.
+- A major developer tool or framework release ONLY if it's a huge, landmark version —
+  not routine point-releases. A general "big GitHub update / new capability" is fine;
+  a minor version bump is not.
+- A big consumer product launch ONLY if it's genuinely significant (a major new iPhone,
+  a landmark device) — not routine refreshes or gadget reviews.
+- Tech policy/regulation ONLY if it directly hits major companies or products (a big
+  antitrust ruling, a major fine, an AI law that changes how big players operate).
+- Security news ONLY if it's genuinely widespread and matters to a lot of ordinary
+  people — a breach or vulnerability affecting millions, a major platform compromise.
 
-A story covered by many sources is only meaningful if it ALSO passes the questions above.
+WHAT TO EXCLUDE (this is where quality lives):
+- Routine maintenance: minor OS point-releases, "app gets small update", patch roundups.
+- Common/frequent security noise: "another ransomware strain found", a run-of-the-mill
+  CVE, a breach at one company that only its own security team needs to care about.
+  Only include security if it's truly widespread and broadly important.
+- In-the-weeds developer tooling that only working engineers on that stack would care about.
+- Gadget reviews, hands-on impressions, deal roundups, gaming, entertainment fluff.
+- Rumors, speculation posts, and "here's what to expect" pieces with no concrete news.
+
+A story covered by many sources is only meaningful if it ALSO passes the three-part test.
 Wide coverage of a routine event (a normal iOS update) is just routine coverage — do not
 mistake volume for importance. Weight your own editorial judgment above the source count.
 
 STEP 2 — DECIDE HOW MANY TO COVER ({MIN_STORIES} to {max_stories}):
-Cover only the stories that genuinely clear the bar above. A big news day might yield
-{max_stories} real stories; a slow day might only yield {MIN_STORIES}. Never pad with
-routine non-events to hit a number — a tight episode of {MIN_STORIES} strong stories beats
-a padded one. Favor: real AI/ML developments, chips and hardware shifts, meaningful dev-tool
-and open-source releases, actual security incidents, and funding/M&A with real figures.
+This is a dense briefing, so lean toward covering MORE stories when the news supports
+it — breadth is the point. Cover every story that clears the bar above. A big news day
+should hit {max_stories}; only a genuinely slow day drops toward {MIN_STORIES}. Never
+pad with routine non-events to hit a number, but don't artificially limit yourself —
+if there are 9 stories that genuinely pass the test, cover 9.
 
 CANDIDATE STORIES (with how many sources covered each — use as ONE input, not the decider):
 {candidate_block}
@@ -562,16 +578,16 @@ SCRIPT:
 
 === HOW TO WRITE IT (this is the important part) ===
 
-JUDGE EACH STORY AND ALLOCATE TIME ACCORDINGLY:
-Not every story deserves equal time. Before writing, rank the stories you chose by
-how big a deal they actually are to a technical audience.
-- The 1-2 BIGGEST stories (major AI model, huge acquisition, serious security event):
-  give each a solid 5-6 sentences with real substance.
-- Mid-tier stories: 3-4 sentences.
-- Minor stories (incremental release, small update): 1-2 sentences. Just hit the
-  headline fact and move on. It is completely fine for a minor story to be quick.
-This variation in length is what makes it sound like a real host with judgment,
-not a machine giving everything equal weight.
+DENSITY — KEEP IT TIGHT, PACK IN MORE STORIES:
+This is a fast, factual briefing, not a talk show. The goal is maximum information
+per minute. Most stories should be just 2-3 tight sentences: the fact, the key
+number or detail, done. Do NOT stretch a story into a paragraph to fill time.
+- Biggest 1-2 stories of the day: up to 4 sentences if there's real substance.
+- Everything else: 2-3 sentences. State the fact and the one detail that matters, move on.
+- A short, dense episode covering MORE stories beats a padded one covering fewer.
+  Prefer breadth: more stories, each tight, over a few stories each drawn out.
+- Never add a sentence just to reach a length target. If a story's told in two
+  sentences, that's two sentences.
 
 WHAT COUNTS AS SIGNAL VS NOISE — THE MOST IMPORTANT PRINCIPLE:
 The source articles are written by journalists who pad stories with narrative color:
@@ -606,32 +622,51 @@ WORKED EXAMPLES:
   (The "under a second" is signal — it's a real capability. The specific cat and the
   specific developer are noise.)
 
-FACTS ONLY — NO SPECULATION, NO ANALYSIS, NO OPINION:
-You are a news anchor, not a commentator. Report what HAPPENED. Never add your own
-interpretation, prediction, or opinion. This is a hard rule:
-- BANNED: "this could imply...", "this might affect...", "this may signal...",
-  "expect to see...", "this suggests...", "it remains to be seen...", "time will
-  tell...", "this positions them to...", "this raises questions about...",
-  "in the long run...", or ANY sentence about what might/could/may happen.
-- If a sentence is about the FUTURE or about MEANING rather than about what
-  happened, delete it. The listener draws their own conclusions — that's the
-  respect this show pays its audience.
-- Factual context IS allowed and good: what it replaces, what it costs, what it's
-  compatible with, who currently uses it, what the previous version did. Those are
-  verifiable facts. "Analysts think X" and "this hints at Y" are not.
-- The one exception: a concrete stated plan is a fact. "The company says the fix
-  ships in August" is reporting. "This will probably help them compete" is opinion.
+FACTS ONLY — NO SPECULATION, NO ANALYSIS, NO OPINION, NO ADVICE:
+You are a wire service relaying facts, not a commentator, analyst, or advisor.
+Report what HAPPENED and stop. Three hard rules:
 
-TALK LIKE A HOST, NOT LIKE DOCUMENTATION:
-- State what changed, plus the factual context that makes it meaningful (what it
-  replaces, real numbers, who's affected) — at the altitude a smart person wants
-  while half-listening on a commute. NOT an exhaustive changelog, and NOT commentary.
-- BAD: listing every crate, function name, syscall, config flag, or percentage from a
-  release. Nobody wants to hear "the gix-pack cache delta decode crate" read aloud.
-- GOOD: "Git 2.55 is out, and the headline is Rust support is now on by default — part
-  of the slow migration away from C for memory safety. There's also a fix for
-  interactive rebase that was mangling merge commits." Then move on.
-- Give the ONE or TWO details that matter, not all ten. And no hype words (exciting,
+1. NO ADVICE OR RECOMMENDATIONS. Never tell the listener what they "should" do.
+   They are experienced engineers — they already know how to do their jobs. Telling
+   them the obvious is condescending and wastes time.
+   - BANNED: "security teams should patch right away", "developers should update to",
+     "you'll want to test this before", "it's worth keeping an eye on", "make sure to",
+     "users are advised to", "the takeaway is", "if you're running X, you should".
+   - Just state the fact. "A critical flaw in OpenSSL lets an attacker run code
+     remotely; a patch is out." — that's it. The listener knows a critical remote-code
+     flaw means patch now. Do NOT say it.
+
+2. NO SPECULATION OR PREDICTION about the future or the meaning of events.
+   - BANNED: "this could imply", "this might affect", "this may signal", "expect to
+     see", "this suggests", "it remains to be seen", "time will tell", "this positions
+     them to", "this raises questions about", "in the long run", or ANY sentence about
+     what might/could/may happen next.
+
+3. NO EDITORIALIZING. Don't tell the listener how to feel or how big a deal something
+   is. Report the facts that establish scale (the numbers, who's affected) and let
+   them judge.
+
+If a sentence is about the FUTURE, about what someone SHOULD do, or about what an
+event MEANS rather than what happened, delete it. Factual context IS allowed: what it
+replaces, what it costs, what it's compatible with, who uses it, what the prior version
+did, and concrete stated plans ("the company says the fix ships in August"). Those are
+verifiable facts. Advice, predictions, and interpretation are not.
+
+TIGHT AND FACTUAL, NOT DOCUMENTATION AND NOT CHATTY:
+- State what happened plus the one or two factual details that matter (a real number,
+  what it replaces, who's affected). Then move to the next story. No warm-up, no wind-down.
+- Write for a tech-savvy but non-engineer listener: explain at the level of "what
+  happened and why it's a big deal," not deep implementation detail. Skip jargon,
+  code names, version-string minutiae, and anything only a specialist on that stack
+  would follow.
+- BAD (too in-the-weeds): "Git 2.55 enables the gix-pack cache delta decode crate and
+  optimizes stat syscall patterns." Nobody but a Git internals dev cares.
+- BAD (too chatty): "So this is actually a pretty interesting one, and it's something
+  a lot of people have been waiting for..." — cut all of that.
+- GOOD (tight, right altitude): "GitHub shipped a major update to its AI coding
+  assistant — it can now handle multi-file changes across a whole repo, something it
+  couldn't do before." One or two sentences, the change and why it matters, done.
+- Give the ONE or TWO details that matter, not all ten. No hype words (exciting,
   fascinating, groundbreaking, revolutionary, game-changer).
 
 NO SYMBOLS, CODE, OR PATHS — CRITICAL FOR AUDIO:
@@ -645,42 +680,59 @@ This is read aloud by text-to-speech. It must contain ZERO of the following:
   belong in audio.
 
 VOICE:
-- Real contractions, natural rhythm, varied sentence length.
-- Lead with the concrete fact: company, number, what shipped.
-- Do NOT add "why this matters" sermons or vague attributions ("reports say").
+- Crisp and factual. Lead every story with the concrete fact: company, number, what shipped.
+- Clear and natural to hear, but not chatty — no filler, no warm-up phrases, no personal
+  asides. Think a sharp newsreader, not a podcaster riffing.
+- Contractions are fine for natural flow. Keep sentences short and declarative.
+- Do NOT add "why this matters" sermons, advice, or vague attributions ("reports say").
 - Ban these words: exciting, fascinating, groundbreaking, revolutionary, game-changer,
   buckle up, let's dive in, stay tuned, it's worth noting, interestingly, notably.
 
-TRANSITIONS — START EACH NEW STORY WITH A CLEAR CUE:
-Every story after the first one must OPEN with a short spoken transition so the
-listener clearly hears a new subject is starting. VARY it — do not reuse the same
-one twice in an episode. Pick ones that fit the story's topic. Examples to draw from
-(and invent similar ones):
-  "Next," / "Moving on," / "Meanwhile," / "Also today,"
-  "In AI," / "On the AI side," / "In chips," / "In security," / "In Apple news,"
-  "Over at [company]," / "Switching gears," / "Turning to [topic],"
-NEVER use "Elsewhere" as a transition — do not use that word to move between stories.
-The FINAL story must start with "Finally," so the listener knows it's the last one.
-The opener line and the first story do NOT get a transition (the opener leads
-straight into story one).
+TRANSITIONS — GENERATE THEM FROM THE STORIES, NEVER FROM A STOCK PHRASE:
+Every story after the first opens with a transition so the listener hears a new
+subject start. The problem to avoid: sounding like the same template every day.
+So DERIVE each transition from the actual stories — do not reach for a generic
+catch-all like "Now in tech news" or "In other news." Use this priority:
+
+1. IF the new story connects to the previous one (same company, same theme, a
+   contrast, a follow-on), transition using that real link:
+     "Google had a second announcement today —"
+     "Staying with AI —"
+     "Apple's in the headlines for a very different reason —"
+     "That's not the only chipmaker making moves —"
+   These are best: they're never repetitive because they come from the specific stories.
+
+2. IF there's no natural link, use a SHORT category cue tied to this story's topic:
+     "On the hardware side —" / "In security —" / "Turning to the legal front —"
+     "Over in AI —" / "In startup news —"
+   Vary these; do not use the same category cue twice in one episode.
+
+HARD RULES:
+- NEVER use these stock phrases: "Now in tech news", "In other news", "In tech news",
+  "Elsewhere", "Moving on", "Next up". They are banned — they're the repetitive filler
+  we're eliminating.
+- Do not reuse ANY transition twice within the same episode.
+- Keep each transition short — a few words, not a sentence of throat-clearing.
+- The FINAL story must start with "Finally," so the listener knows it's the last one.
+- The opener line and the first story get NO transition — the opener leads straight
+  into story one.
 
 FORMAT:
 - Spoken prose only. No markdown, bullets, asterisks, or headers.
 - Don't name the news outlets. Don't start sentences with "today" or "here's".
 - OPENER: start with exactly this line, filling in the real date:
   "It's [Month Day]. This is your Daily Dump of tech news."
-- CLOSER: end with exactly this line: "And that's it for your Daily Dump. See you again, tomorrow."
+- CLOSER: end with exactly this line: "And that's all for today. Tune in tomorrow for another Daily Dump."
 - BETWEEN STORIES: put the marker [[PAUSE]] on its own line between each story
   (after you finish one story, before you start the next). This signals a beat of
   silence so the listener hears a clear break between subjects. Do NOT put a pause
   after the opener or before the closer — only between the story bodies.
 
-LENGTH: The episode should always run about 5 minutes. At the podcast's speaking
-pace that means roughly 790 words total, NO MATTER how many stories you cover.
-This is important: if you only cover 3 stories, give each one MORE depth and context
-so the episode still fills 5 minutes. If you cover 7, keep each tighter. Fewer
-stories means richer coverage of each, not a shorter episode. Distribute words
-UNEVENLY based on importance, but always land around 790 words total.
+LENGTH: The episode should run about 5 minutes — roughly 790 words. Fill that with
+BREADTH, not padding: more stories, each tight, rather than a few stretched out. If
+you're short on length, ADD ANOTHER STORY rather than lengthening the ones you have.
+Only if there genuinely aren't enough worthwhile stories should you give the top ones
+slightly more room. Never inflate a story with filler to hit the word count.
 
 Begin now:"""
 
@@ -716,17 +768,20 @@ def expand_script(short_script: str, target_low: int = 750) -> str:
         return short_script
 
     current = len(short_script.split())
-    prompt = f"""This tech news podcast script is too short. It's {current} words
-but needs to be about {target_low} words for a full 5-minute episode.
+    prompt = f"""This tech news briefing script is a bit short. It's {current} words
+but should be about {target_low} words for a 5-minute episode.
 
-Lengthen it by giving each story — especially the biggest one or two — more depth:
-more FACTS about what happened, factual background (what it replaces, real numbers,
-prior version, who's affected), and concrete details from the reporting. Do NOT add
-speculation, predictions, implications, or opinion — no "this could", "this might",
-"this suggests". Facts only. Do NOT add new stories. Do NOT add technical minutiae
-like function names, file paths, crate names, syscalls, or code symbols — this is
-read aloud by text-to-speech and symbols sound broken. Do NOT add hype.
-Keep the same conversational engineer-to-engineer voice. Spoken prose only, no markdown.
+Add more FACTUAL substance to the existing stories: real numbers, what a thing
+replaces, the prior version, who's affected, concrete details from the reporting.
+Keep each addition tight and factual — 1-2 dense sentences, not padding.
+STRICT RULES:
+- NO advice or recommendations ("should patch", "developers should", "worth keeping
+  an eye on"). The audience are experts; never tell them what to do.
+- NO speculation or prediction ("this could", "this might", "this suggests", "expect").
+- NO opinion or editorializing. Facts only.
+- Do NOT add new stories. Do NOT add technical minutiae like function names, file
+  paths, crate names, or code symbols (read aloud by TTS — they sound broken).
+- Keep the crisp, factual, non-chatty newsreader voice. Spoken prose, no markdown.
 
 Return ONLY the expanded script, nothing else.
 
@@ -838,10 +893,10 @@ def text_to_speech(script: str, output_path: str) -> bool:
             segments = [cleaned]
 
         # Pull the closing sign-off out of the last segment so we can slow it down.
-        # Matches "And that's it for your Daily Dump. See you again, tomorrow."
+        # Matches "And that's all for today. Tune in tomorrow for another Daily Dump."
         closer = None
         closer_pat = re.compile(
-            r"(and that'?s it for your daily dump\.?\s*see you again,?\s*tomorrow[.!]?)\s*$",
+            r"(and that'?s all for today\.?\s*tune in tomorrow for another daily dump[.!]?)\s*$",
             re.IGNORECASE,
         )
         if segments:
