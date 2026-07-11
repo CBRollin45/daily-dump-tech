@@ -2,12 +2,23 @@ name: Generate Daily Dump Tech
 
 on:
   schedule:
-    # 5am Central Time.
-    #   Summer (CDT, ~Mar–Nov): 5am CDT = 10:00 UTC  -> '0 10 * * *'
-    #   Winter (CST, ~Nov–Mar): 5am CST = 11:00 UTC  -> '0 11 * * *'
-    # Currently set for CDT. Change to '0 11 * * *' when clocks fall back in November.
-    - cron: '0 10 * * *'
-  workflow_dispatch:  # manual trigger from the Actions tab
+    # GitHub's scheduler is best-effort and often runs LATE (sometimes hours) at
+    # the top of the hour, which is the most congested slot. We use odd minutes
+    # and schedule early so a delayed run still lands in the morning. We also
+    # fire a few times as a safety net — the script no-ops/replaces if today's
+    # episode already exists, so extra triggers are harmless.
+    #   Target: ready by ~5am Central.
+    #   Summer (CDT): Central = UTC-5.  Winter (CST): Central = UTC-6.
+    # These are set for CDT (summer). Add one hour to each UTC time in winter.
+    - cron: '23 8 * * *'    # ~3:23am CDT  (primary, early to absorb delay)
+    - cron: '23 9 * * *'    # ~4:23am CDT  (safety net if the first was skipped)
+    - cron: '23 10 * * *'   # ~5:23am CDT  (last-resort catch-up)
+  workflow_dispatch:        # manual trigger from the Actions tab
+
+# Don't let overlapping scheduled runs stack up; keep only the latest.
+concurrency:
+  group: daily-dump-generate
+  cancel-in-progress: false
 
 jobs:
   generate:
@@ -19,28 +30,57 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Skip if today's episode already exists
+        id: guard
+        run: |
+          TODAY="daily-dump-tech-$(date +%Y-%m-%d).mp3"
+          if [ -f "docs/episodes/$TODAY" ]; then
+            echo "already_done=true" >> "$GITHUB_OUTPUT"
+            echo "Episode for today already exists ($TODAY) — skipping."
+          else
+            echo "already_done=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
+        if: steps.guard.outputs.already_done == 'false'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
+        if: steps.guard.outputs.already_done == 'false'
         run: pip install -r requirements.txt
 
-      - name: Generate podcast episode
+      - name: Generate podcast episode (with retries)
+        if: steps.guard.outputs.already_done == 'false'
         env:
           GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
           PODCAST_BASE_URL: ${{ secrets.PODCAST_BASE_URL }}
           NEWSAPI_KEY:      ${{ secrets.NEWSAPI_KEY }}
           GNEWS_KEY:        ${{ secrets.GNEWS_KEY }}
-        run: python generate_podcast.py
+        run: |
+          n=0
+          until [ $n -ge 3 ]; do
+            echo "=== Attempt $((n+1)) of 3 ==="
+            if python generate_podcast.py; then
+              echo "Generation succeeded."
+              exit 0
+            fi
+            n=$((n+1))
+            echo "Attempt failed. Waiting 60s before retry..."
+            sleep 60
+          done
+          echo "All 3 attempts failed."
+          exit 1
 
       - name: Move MP3 to docs/episodes for GitHub Pages
+        if: steps.guard.outputs.already_done == 'false'
         run: |
           mkdir -p docs/episodes
           mv output/*.mp3 docs/episodes/ || true
 
       - name: Commit everything (RSS feed, MP3, memory, transcript)
+        if: steps.guard.outputs.already_done == 'false'
         run: |
           git config --global user.name  "Daily Dump Bot"
           git config --global user.email "bot@dailydump.local"
@@ -51,6 +91,7 @@ jobs:
           git push
 
       - name: Upload transcript as artifact
+        if: steps.guard.outputs.already_done == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: transcript-${{ github.run_id }}
